@@ -1,64 +1,86 @@
-name: "Sing-box Rules Factory 2026"
+name: "Sing-box Rules Factory PRO"
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 每天凌晨 0 点自动开工
-  workflow_dispatch: # 支持你随时点击按钮手动开工
+    - cron: '0 2 * * *' # 每天凌晨2点自动更新
+  workflow_dispatch: # 支持你手动点 Run workflow
 
-# 核心：赋予脚本写入权限，强制使用 Node 24 环境
-permissions:
-  contents: write
-
+# 强制全局环境，解决你看到的 Node.js 24 警告
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
-  build_rules:
+  build_srs:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 必须给写入权限，否则 push 会报错
+    
     steps:
-      - name: Checkout Repository
+      - name: "1. 检出仓库代码"
         uses: actions/checkout@v4
 
-      - name: Get Latest sing-box & Install
+      - name: "2. 环境初始化 (安装最新 sing-box)"
         run: |
-          # 动态获取官方最新 Release 版本号，不敷衍，永远最新
-          TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name | sed 's/v//')
-          echo "Installing sing-box version: $TAG"
-          curl -Lo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v{TAG}/sing-box-${TAG}-linux-amd64.tar.gz"
+          # 动态获取官方最新版本号，不写死，永远用最新的编译器
+          LATEST_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name | sed 's/v//')
+          echo "检测到最新版本: $LATEST_VERSION"
+          curl -Lo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v{LATEST_VERSION}/sing-box-${LATEST_VERSION}-linux-amd64.tar.gz"
           tar -xzf sing-box.tar.gz
           mv sing-box-*/sing-box .
           chmod +x sing-box
 
-      - name: Process TXT and Convert to SRS
+      - name: "3. 规则清洗与 JSON 转换"
         run: |
-          # 1. 下载你的原始 TXT 规则 (GOODBYEADS)
-          curl -Lo original.txt "https://raw.githubusercontent.com/8680/GOODBYEADS/master/data/rules/ad-domain.txt"
+          # 下载你指定的 GOODBYEADS 原始文件
+          curl -Lo original.txt "https://raw.githubusercontent.com/8680/GOODBYEADS/master/data/rules/ad-domain.txt.txt"
           
-          # 2. 清洗数据：去掉注释、空行、空格
-          sed -i 's/[[:space:]]//g' original.txt
-          grep -v '^#' original.txt | grep -v '^$' > clean.txt
+          # 核心逻辑：利用 Python 处理 JSON，比 sed 稳一万倍，绝不会因为特殊字符报错
+          python3 <<EOF
+          import json
+          domains = []
+          suffixes = []
+          with open('original.txt', 'r') as f:
+              for line in f:
+                  line = line.strip()
+                  if not line or line.startswith('#'):
+                      continue
+                  if line.startswith('*.'):
+                      suffixes.append(line[2:])
+                  elif line.startswith('*'):
+                      suffixes.append(line[1:])
+                  else:
+                      domains.append(line)
           
-          # 3. 智能分流解析：
-          # 把 *.abc.com 提取出来变成 abc.com 放入 domain_suffix
-          grep '^\*' clean.txt | sed 's/^\*\.//g' | sed 's/^\*//g' > suffixes.txt
-          # 把剩下的普通域名放入 domain
-          grep -v '^\*' clean.txt > domains.txt
+          data = {
+              "version": 1,
+              "rules": [{
+                  "domain": domains,
+                  "domain_suffix": suffixes
+              }]
+          }
+          with open('rules.json', 'w') as f:
+              json.dump(data, f, indent=2)
+          EOF
+          echo "JSON 转换成功！"
 
-          # 4. 构建符合 2026 最新标准的 sing-box JSON
-          echo '{"version": 1, "rules": [{"domain": [' > rules.json
-          sed 's/.*/"&",/' domains.txt | sed '$ s/,$//' >> rules.json
-          echo '], "domain_suffix": [' >> rules.json
-          sed 's/.*/"&",/' suffixes.txt | sed '$ s/,$//' >> rules.json
-          echo ']}]}' >> rules.json
-          
-          # 5. 编译成二进制 SRS
+      - name: "4. 编译为二进制 SRS"
+        run: |
           ./sing-box rule-set compile rules.json -o goodbyeads.srs
-          echo "Compilation successful: goodbyeads.srs generated."
+          if [ -f "goodbyeads.srs" ]; then
+            echo "SRS 编译完成！文件大小: $(du -h goodbyeads.srs | cut -f1)"
+          else
+            echo "SRS 编译失败！" && exit 1
+          fi
 
-      - name: Auto Push to GitHub
+      - name: "5. 自动提交并推送"
         run: |
-          git config --local user.email "bot@github.com"
-          git config --local user.name "Rules-Bot-2026"
+          git config --local user.email "github-actions[bot]@github.com"
+          git config --local user.name "github-actions[bot]"
           git add goodbyeads.srs
-          # 只有在文件有变化时才提交，避免无效记录
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update rules: $(date +'%Y-%m-%d %H:%M')" && git push)
+          # 只有在文件内容真的变了才提交，防止空提交报错
+          if git diff --staged --quiet; then
+            echo "规则没有变化，跳过提交"
+          else
+            git commit -m "自动更新: $(date +'%Y-%m-%d %H:%M')"
+            git push
+          fi
