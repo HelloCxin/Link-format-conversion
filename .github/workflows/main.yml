@@ -1,0 +1,50 @@
+name: Update Rule Set
+on:
+  schedule:
+    - cron: '0 0 * * *' # 每天凌晨更新
+  workflow_dispatch: # 支持手动点击运行
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install sing-box
+        run: |
+          curl -Lo sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.8.5/sing-box-1.8.5-linux-amd64.tar.gz
+          tar -xzf sing-box.tar.gz
+          mv sing-box-*/sing-box .
+
+      - name: Convert TXT to SRS
+        run: |
+          # 1. 下载你的 TXT 文件 (这里已经换成了你提供的 GOODBYEADS 链接)
+          curl -Lo rules.txt "https://raw.githubusercontent.com/8680/GOODBYEADS/master/data/rules/ad-domain.txt          
+          # 2. 处理格式：剔除注释和空行，将 *.abc.com 转为 abc.com 并归类为后缀匹配
+          grep -v '^#' rules.txt | grep -v '^[[:space:]]*$' > clean.txt
+          
+          # 提取带 * 的域名作为 domain_suffix
+          grep '^\*' clean.txt | sed 's/^\*\.//g' | sed 's/^\*//g' > suffixes.txt"
+          # 提取普通域名作为 domain
+          grep -v '^\*' clean.txt > domains.txt
+
+          # 3. 构造 sing-box JSON
+          echo '{"version": 1, "rules": [' > rules.json
+          echo '  {"domain": [' >> rules.json
+          sed 's/.*/"&",/' domains.txt | sed '$ s/,$//' >> rules.json
+          echo '  ], "domain_suffix": [' >> rules.json
+          sed 's/.*/"&",/' suffixes.txt | sed '$ s/,$//' >> rules.json
+          echo '  ]}' >> rules.json
+          echo ']}' >> rules.json
+          
+          # 4. 编译成 srs
+          ./sing-box rule-set compile rules.json -o goodbyeads.srs
+
+      - name: Push to Repository
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add goodbyeads.srs
+          git commit -m "Update GoodbyeAds rules" || exit 0
+          git push
